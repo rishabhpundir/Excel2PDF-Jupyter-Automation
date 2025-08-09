@@ -13,6 +13,7 @@ Run:
 """
 
 import os
+import math
 import argparse
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -21,10 +22,10 @@ import fitz
 import pandas as pd
 
 # ReportLab for writing a new PDF
-from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.colors import black
+from reportlab.pdfgen import canvas as rl_canvas
 
 # Arabic helpers
 try:
@@ -236,6 +237,72 @@ def draw_mixed_line(
         y -= leading
     return y
 
+
+def _normalize_value(v):
+    """Format values to fit nicely inside cells."""
+    if pd.isna(v) or v is None or str(v).strip() == "":
+        return "—"
+    if isinstance(v, (int,)) and not isinstance(v, bool):
+        return f"{v}"
+    # try number
+    try:
+        f = float(v)
+        # trim trailing zeros, max 3 decimals
+        s = f"{f:.3f}".rstrip("0").rstrip(".")
+        return s
+    except Exception:
+        pass
+    # booleans / yes-no
+    sv = str(v).strip()
+    if sv.lower() in {"true", "yes", "y", "1"}:
+        return "Yes"
+    if sv.lower() in {"false", "no", "n", "0"}:
+        return "No"
+    return sv
+
+
+def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_latin, font_ar, font_size):
+    """Draw one table row with adjacent KEY and VALUE cells."""
+    # cell borders
+    cnv.setLineWidth(0.5)
+    # key cell
+    cnv.rect(x, y - row_height, key_w, row_height, stroke=1, fill=0)
+    # value cell
+    cnv.rect(x + key_w, y - row_height, val_w, row_height, stroke=1, fill=0)
+
+    # cell padding
+    CELL_PAD = 6  # <-- small horizontal padding
+
+    # vertically center single-line text
+    baseline = y - (row_height - font_size) / 2 - 2.5
+
+    # key (left cell)
+    draw_mixed_line(
+        cnv=cnv,
+        x_left=x + CELL_PAD,
+        y_baseline=baseline,
+        max_width=key_w - 2 * CELL_PAD,
+        latin_font=font_latin,
+        ar_font=font_latin,
+        kv_text=str(key_text),
+        kv_size=font_size,
+        leading=font_size + 2
+    )
+
+    # value (right cell)
+    draw_mixed_line(
+        cnv=cnv,
+        x_left=x + key_w + CELL_PAD,
+        y_baseline=baseline,
+        max_width=val_w - 2 * CELL_PAD,
+        latin_font=font_latin,
+        ar_font=font_ar,
+        kv_text=str(val_text),
+        kv_size=font_size,
+        leading=font_size + 2
+    )
+
+
 # ---------------- Main ----------------
 def main():
     ap = argparse.ArgumentParser()
@@ -271,7 +338,6 @@ def main():
     # Drop title fields from the key-value printing DataFrame
     df = df[[c for c in df.columns if c.lower() not in [t.lower() for t in title_fields]]]
 
-
     # Fonts: hard-coded auto-detection (no CLI arg)
     ar_font = register_arabic_font()  # Arabic-capable or fallback to Helvetica
 
@@ -280,18 +346,20 @@ def main():
     cnv.setFillColor(black)
 
     # Layout constants
-    margin_l, margin_r = 40, 40
-    margin_t, margin_b = 40, 40
-    kv_font_size = 12
+    margin_l, margin_r = 20, 20
+    margin_t, margin_b = 20, 20
+    kv_font_size = 10
     leading = 18
     gap_between_pairs = 6
 
     # Calculate two column widths and positions
-    col_gap = 40
-    usable_width = page_w - margin_l - margin_r - col_gap
-    col_width = usable_width / 2
-    left_x = margin_l
-    right_x = margin_l + col_width + col_gap
+    col_gap = 10
+    content_width = (page_w - margin_l - margin_r) * 2.90/5.0   # take ~2/3 of usable width
+    col_width = (content_width - col_gap) / 2.0              # two columns inside that block
+    # anchor the 2-column block to the RIGHT side of the page
+    block_left_x = page_w - margin_r - content_width
+    left_x = block_left_x
+    right_x = block_left_x + col_width + col_gap
 
     for idx, row in df.iterrows():
         # Build title from the original full DF so we still have region/city/hay/pca
@@ -317,47 +385,62 @@ def main():
         title_to_columns_gap = 20
         y_left = y_after_title - title_to_columns_gap
         y_right = y_after_title - title_to_columns_gap
-
         col_toggle = "left"
 
-        for col in df.columns:
-            raw_val = row[col]
-            val = "" if pd.isna(raw_val) else str(raw_val)
-            kv_full = f"{col}: {val}"
+        cell_height = 30
+        row_gap = 0
 
-            if col_toggle == "left":
-                y_left = draw_mixed_line(
-                    cnv=cnv,
-                    x_left=left_x,
-                    y_baseline=y_left,
-                    max_width=col_width,
-                    latin_font=LATIN_FONT,
-                    ar_font=ar_font,
-                    kv_text=kv_full,
-                    kv_size=kv_font_size,
-                    leading=leading
-                )
-                y_left -= gap_between_pairs
-                col_toggle = "right"
-            else:
-                y_right = draw_mixed_line(
-                    cnv=cnv,
-                    x_left=right_x,
-                    y_baseline=y_right,
-                    max_width=col_width,
-                    latin_font=LATIN_FONT,
-                    ar_font=ar_font,
-                    kv_text=kv_full,
-                    kv_size=kv_font_size,
-                    leading=leading
-                )
-                y_right -= gap_between_pairs
-                col_toggle = "left"
+        # equal widths for key and value cells
+        key_w = col_width / 2.0
+        val_w = col_width / 2.0
 
+        # how many rows fit in one column below the title
+        available_height = min(y_left, y_right) - margin_b
+        rows_per_col = max(1, int((available_height + row_gap) // (cell_height + row_gap)))
+
+        # split list EQUALLY between LEFT and RIGHT (odd extra goes LEFT)
+        all_keys = list(df.columns)
+        n = len(all_keys)
+
+        max_rows = rows_per_col
+        left_n = min(max_rows, (n + 1) // 2)
+        right_n = min(max_rows, n - left_n)
+        col1_items = all_keys[:left_n]
+        col2_items = all_keys[left_n:left_n + right_n]
+        # (any leftover beyond 2 * max_rows is omitted to keep everything on a single page)
+
+        # draw LEFT column
+        y = y_left
+        for key in col1_items:
+            raw_val = row[key]
+            val = _normalize_value(raw_val)
+            draw_kv_row(
+                cnv, left_x, y, cell_height,
+                key_text=key, val_text=val,
+                key_w=key_w, val_w=val_w,
+                font_latin=LATIN_FONT, font_ar=ar_font, font_size=kv_font_size
+            )
+            y -= (cell_height + row_gap)
+        y_left = y
+
+        # draw RIGHT column
+        y = y_right
+        for key in col2_items:
+            raw_val = row[key]
+            val = _normalize_value(raw_val)
+            draw_kv_row(
+                cnv, right_x, y, cell_height,
+                key_text=key, val_text=val,
+                key_w=key_w, val_w=val_w,
+                font_latin=LATIN_FONT, font_ar=ar_font, font_size=kv_font_size
+            )
+            y -= (cell_height + row_gap)
+        y_right = y
         cnv.showPage()
-
+        
     cnv.save()
     print(f"PDF output saved to --> {out_path}.")
+
 
 if __name__ == "__main__":
     main()
