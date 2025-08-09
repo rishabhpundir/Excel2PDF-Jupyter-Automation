@@ -561,7 +561,7 @@ def main():
         img_width   = max(0, img_right_x - img_left_x)
 
         # Vertical bounds (same top as columns; bottom at margin)
-        img_top    = y_after_title + 52.5
+        img_top    = y_after_title - title_to_columns_gap
         img_bottom = margin_b
         img_height = max(0, img_top - img_bottom)
 
@@ -574,14 +574,19 @@ def main():
             reader = ImageReader(str(img_path))
             iw, ih = reader.getSize()
 
-            # scale to fit (preserve aspect ratio)
-            scale = min(img_width / iw, img_height / ih)
+            # scale to fit (preserve aspect ratio), anchored to start at the same top as the table
+            avail_w = img_width
+            avail_h = img_top - img_bottom  # don't cross the title area
+            scale = min(avail_w / iw, avail_h / ih)
             draw_w = iw * scale
             draw_h = ih * scale
 
-            # center inside the left block
-            draw_x = img_left_x + (img_width - draw_w) / 2
-            draw_y = img_bottom + (img_height - draw_h) / 2
+            # horizontally center within the left block, TOP‑ALIGN to the table start
+            draw_x = img_left_x + (avail_w - draw_w) / 2
+            draw_y = img_top - draw_h  # top-aligned so it never overlaps the title
+            # clamp just in case
+            if draw_y < img_bottom:
+                draw_y = img_bottom
 
             cnv.drawImage(reader, draw_x, draw_y, width=draw_w, height=draw_h, mask='auto')
         # --- end LEFT-SIDE IMAGE ---
