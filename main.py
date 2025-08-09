@@ -24,6 +24,7 @@ import pandas as pd
 # ReportLab for writing a new PDF
 from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as rl_canvas
 
@@ -66,9 +67,10 @@ template_keys = [
     "Mobily Category",
     "Dawiyat Category",
     "TLS Category",
+    "image"
 ]
 
-title_fields = ["region", "city", "hay", "pca"]
+title_fields = ["region", "city", "hay", "pca", "image"]
 
 # ---------------- Arabic detection / shaping ----------------
 def is_arabic_char(ch: str) -> bool:
@@ -548,6 +550,42 @@ def main():
             )
             y -= (cell_height + row_gap)
         y_right = y
+        
+        # --- start LEFT-SIDE IMAGE ---
+        img_gap = 5     # gap between image block and table block
+        img_pad = 5      # inner padding inside the image block
+
+        # Horizontal bounds for the image area
+        img_left_x  = margin_l
+        img_right_x = block_left_x - img_gap - img_pad
+        img_width   = max(0, img_right_x - img_left_x)
+
+        # Vertical bounds (same top as columns; bottom at margin)
+        img_top    = y_after_title + 52.5
+        img_bottom = margin_b
+        img_height = max(0, img_top - img_bottom)
+
+        # Try to load the image from ./images/<filename in 'image' column>
+        row_full = df_full.iloc[idx]  # original row with all fields
+        img_name = str(row_full.get('image', '')).strip() if hasattr(row_full, "get") else ""
+        img_path = Path("images") / img_name
+
+        if img_width > 0 and img_height > 0 and img_name and img_path.exists():
+            reader = ImageReader(str(img_path))
+            iw, ih = reader.getSize()
+
+            # scale to fit (preserve aspect ratio)
+            scale = min(img_width / iw, img_height / ih)
+            draw_w = iw * scale
+            draw_h = ih * scale
+
+            # center inside the left block
+            draw_x = img_left_x + (img_width - draw_w) / 2
+            draw_y = img_bottom + (img_height - draw_h) / 2
+
+            cnv.drawImage(reader, draw_x, draw_y, width=draw_w, height=draw_h, mask='auto')
+        # --- end LEFT-SIDE IMAGE ---
+        
         cnv.showPage()
         
     cnv.save()
