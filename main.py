@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Excel -> PDF (one page per row), simple "Key: Value" list.
 - Page size / orientation is copied from the FIRST PAGE of template.pdf
@@ -14,13 +12,13 @@ Run:
     python main2.py --excel "sample rows.xlsx" --template template.pdf --out new.pdf
 """
 
-import argparse
 import os
+import argparse
 from pathlib import Path
 from typing import Optional, List, Tuple
 
+import fitz
 import pandas as pd
-import fitz  # PyMuPDF (to read template page size)
 
 # ReportLab for writing a new PDF
 from reportlab.pdfgen import canvas as rl_canvas
@@ -36,7 +34,7 @@ except Exception:
     arabic_reshaper = None
     get_display = None
     
-# ONLY columns that are required
+# ONLY list columns that are required
 template_keys = [
     "region", "city", "hay", "pca",
     "Population",
@@ -68,6 +66,8 @@ template_keys = [
     "Dawiyat Category",
     "TLS Category",
 ]
+
+title_fields = ["region", "city", "hay", "pca"]
 
 # ---------------- Arabic detection / shaping ----------------
 def is_arabic_char(ch: str) -> bool:
@@ -266,6 +266,11 @@ def main():
 
     # filter & reorder
     df = df[keep_cols]
+    df_full = df.copy()
+
+    # Drop title fields from the key-value printing DataFrame
+    df = df[[c for c in df.columns if c.lower() not in [t.lower() for t in title_fields]]]
+
 
     # Fonts: hard-coded auto-detection (no CLI arg)
     ar_font = register_arabic_font()  # Arabic-capable or fallback to Helvetica
@@ -274,52 +279,87 @@ def main():
     cnv = rl_canvas.Canvas(str(out_path), pagesize=(page_w, page_h))
     cnv.setFillColor(black)
 
-    # Layout
+    # Layout constants
     margin_l, margin_r = 40, 40
     margin_t, margin_b = 40, 40
     kv_font_size = 12
     leading = 18
-    max_width = page_w - margin_l - margin_r
+    gap_between_pairs = 6
 
-    for _, row in df.iterrows():
-        y = page_h - margin_t
+    # Calculate two column widths and positions
+    col_gap = 40
+    usable_width = page_w - margin_l - margin_r - col_gap
+    col_width = usable_width / 2
+    left_x = margin_l
+    right_x = margin_l + col_width + col_gap
+
+    for idx, row in df.iterrows():
+        # Build title from the original full DF so we still have region/city/hay/pca
+        row_full = df_full.iloc[idx]
+        title_text = f"{row_full['Region']} – {row_full['City']} – {row_full['Hay']} – {row_full['PCA']}"
+
+        # Use mixed-script renderer for title
+        title_font_size = 14
+        y_title_top = page_h - margin_t
+        y_after_title = draw_mixed_line(
+            cnv=cnv,
+            x_left=margin_l,
+            y_baseline=y_title_top,
+            max_width=page_w - margin_l - margin_r,
+            latin_font=LATIN_FONT,
+            ar_font=ar_font,
+            kv_text=title_text,
+            kv_size=title_font_size,
+            leading=title_font_size + 6  # line height for title
+        )
+
+        # Add spacing before key-value columns start
+        title_to_columns_gap = 20
+        y_left = y_after_title - title_to_columns_gap
+        y_right = y_after_title - title_to_columns_gap
+
+        col_toggle = "left"
+
         for col in df.columns:
             raw_val = row[col]
             val = "" if pd.isna(raw_val) else str(raw_val)
+            kv_full = f"{col}: {val}"
 
-            # Build "Key: Value" but keep fonts separate:
-            #   - key + ": " goes in Latin font
-            #   - value is segmented and drawn mixed-font
-            key_prefix = f"{col}: "
-
-            # Draw key prefix first (wrap-aware: we combine as a single string and let the mixed renderer handle it)
-            # To keep it simple, we pass the full "key: value" to the mixed renderer,
-            # but we force the key portion to be Latin by temporarily marking non-Arabic.
-            kv_full = key_prefix + val
-            print(f"+++{kv_full}+++")
-            # Mixed draw
-            y = draw_mixed_line(
-                cnv=cnv,
-                x_left=margin_l,
-                y_baseline=y,
-                max_width=max_width,
-                latin_font=LATIN_FONT,
-                ar_font=ar_font,
-                kv_text=kv_full,
-                kv_size=kv_font_size,
-                leading=leading
-            )
-
-            # Page break safety
-            if y < margin_b + leading:
-                cnv.showPage()
-                cnv.setFillColor(black)
-                y = page_h - margin_t
+            if col_toggle == "left":
+                y_left = draw_mixed_line(
+                    cnv=cnv,
+                    x_left=left_x,
+                    y_baseline=y_left,
+                    max_width=col_width,
+                    latin_font=LATIN_FONT,
+                    ar_font=ar_font,
+                    kv_text=kv_full,
+                    kv_size=kv_font_size,
+                    leading=leading
+                )
+                y_left -= gap_between_pairs
+                col_toggle = "right"
+            else:
+                y_right = draw_mixed_line(
+                    cnv=cnv,
+                    x_left=right_x,
+                    y_baseline=y_right,
+                    max_width=col_width,
+                    latin_font=LATIN_FONT,
+                    ar_font=ar_font,
+                    kv_text=kv_full,
+                    kv_size=kv_font_size,
+                    leading=leading
+                )
+                y_right -= gap_between_pairs
+                col_toggle = "left"
 
         cnv.showPage()
 
     cnv.save()
-    print(f"OK: wrote {out_path}")
+    print(f"PDF output saved to --> {out_path}.")
 
 if __name__ == "__main__":
     main()
+
+# python main.py --excel "sample rows.xlsx" --template template.pdf --out output.pdf
