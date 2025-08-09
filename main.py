@@ -9,11 +9,10 @@ Excel -> PDF (one page per row), simple "Key: Value" list.
 - Very simple wrapping to page width (left-aligned lines for simplicity)
 
 Run:
-    python main2.py --excel "sample rows.xlsx" --template template.pdf --out new.pdf
+    python main2.py --excel "sample rows.xlsx" --output new.pdf
 """
 
 import os
-import math
 import argparse
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -21,12 +20,17 @@ from typing import Optional, List, Tuple
 import fitz
 import pandas as pd
 
-# ReportLab for writing a new PDF
 from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.lib.pagesizes import landscape, A4
+
+
+# Hard-coded Page size using A4-landscape width
+PAGE_WIDTH, PAGE_HEIGHT = landscape(A4)
+# PAGE_HEIGHT = PAGE_WIDTH * 9.0 / 16.0         # If a 16:9 page area is required
 
 # Arabic helpers
 try:
@@ -70,29 +74,7 @@ template_keys = [
     "image"
 ]
 
-title_fields = ["region", "city", "hay", "pca", "image"]
-
-# ---------------- Arabic detection / shaping ----------------
-def is_arabic_char(ch: str) -> bool:
-    return (
-        ("\u0600" <= ch <= "\u06FF") or
-        ("\u0750" <= ch <= "\u077F") or
-        ("\u08A0" <= ch <= "\u08FF") or
-        ("\uFB50" <= ch <= "\uFDFF") or
-        ("\uFE70" <= ch <= "\uFEFF")
-    )
-
-def is_arabic_text(s: str) -> bool:
-    if not isinstance(s, str):
-        return False
-    return any(is_arabic_char(ch) for ch in s)
-
-def shape_arabic(s: str) -> str:
-    if not isinstance(s, str) or not s:
-        return s
-    if arabic_reshaper and get_display and is_arabic_text(s):
-        return get_display(arabic_reshaper.reshape(s))
-    return s
+exclusion_fields = ["region", "city", "hay", "pca", "image"]
 
 # ---------------- Fonts ----------------
 LATIN_FONT = "Helvetica"           # built-in (good Latin)
@@ -132,10 +114,33 @@ AR_CANDIDATES = [
     "AlBayan.ttc",      # macOS
 ]
 
-# ---- Bold Arabic font detection & registration ----
-LATIN_FONT_BOLD = "Helvetica-Bold"
-AR_FONT_BOLD_NAME = "CustomArabicFont-Bold"
 
+# ---------------- Arabic detection / shaping ----------------
+def is_arabic_char(ch: str) -> bool:
+    return (
+        ("\u0600" <= ch <= "\u06FF") or
+        ("\u0750" <= ch <= "\u077F") or
+        ("\u08A0" <= ch <= "\u08FF") or
+        ("\uFB50" <= ch <= "\uFDFF") or
+        ("\uFE70" <= ch <= "\uFEFF")
+    )
+
+
+def is_arabic_text(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
+    return any(is_arabic_char(ch) for ch in s)
+
+
+def shape_arabic(s: str) -> str:
+    if not isinstance(s, str) or not s:
+        return s
+    if arabic_reshaper and get_display and is_arabic_text(s):
+        return get_display(arabic_reshaper.reshape(s))
+    return s
+
+
+# ---- Bold Arabic font detection & registration ----
 def _find_font_recursive(preferred_names, bases, exts=(".ttf", ".otf", ".ttc")) -> Optional[Path]:
     for base in bases:
         bp = Path(base)
@@ -149,53 +154,6 @@ def _find_font_recursive(preferred_names, bases, exts=(".ttf", ".otf", ".ttc")) 
                 for name in preferred_names:
                     if name.lower() in lf:
                         return Path(root) / f
-    return None
-
-def register_arabic_font_bold() -> str:
-    """
-    Try hard to find a *bold* Arabic font on macOS (Myriad/Kigelia/SF Arabic),
-    else fall back to Noto/Amiri bold, else to regular Arabic, else to Latin bold.
-    """
-    # Most likely macOS names first
-    preferred_names = [
-        "myriadarabic-bold", "myriad arabic bold",
-        "kigeliaarabic-bold", "kigelia arabic bold",
-        "sfarabic-bold", "sf arabic bold",
-        # common open fonts as fallback
-        "notonaskharabic-bold", "notokufiarabic-bold",
-        "amiri-bold",
-        "geeza", "albayan",
-    ]
-    bases = ["." , "/System/Library/Fonts", "/System/Library/Fonts/Supplemental",
-             "/Library/Fonts", os.path.expanduser("~/Library/Fonts"),
-             "/usr/share/fonts/truetype", "/usr/share/fonts"]
-
-    p = _find_font_recursive(preferred_names, bases)
-    if p:
-        try:
-            pdfmetrics.registerFont(TTFont(AR_FONT_BOLD_NAME, str(p)))
-            return AR_FONT_BOLD_NAME
-        except Exception:
-            pass
-
-    # fallbacks
-    try:
-        pdfmetrics.getFont(AR_FONT_NAME)  # your regular Arabic font name
-        return AR_FONT_NAME
-    except Exception:
-        return LATIN_FONT_BOLD
-
-
-def find_arabic_font_bold() -> Optional[Path]:
-    # mirror your find_arabic_font(), but search bold candidates
-    for base in FONT_SEARCH_PATHS:
-        try:
-            for cand in BOLD_CANDIDATES:
-                p = Path(base) / cand if base != "." else Path(cand)
-                if p.exists():
-                    return p
-        except Exception:
-            continue
     return None
 
 
@@ -412,21 +370,11 @@ def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_la
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--excel", required=True, help="Path to input .xlsx")
-    ap.add_argument("--template", required=True, help="Path to template.pdf (only page size/orientation used)")
-    ap.add_argument("--out", default="output_simple.pdf", help="Output PDF path")
+    ap.add_argument("--output", default="output_simple.pdf", help="Output PDF path")
     args = ap.parse_args()
 
     excel_path = Path(args.excel)
-    template_path = Path(args.template)
-    out_path = Path(args.out)
-
-    # Read first page size from template
-    tpl = fitz.open(str(template_path))
-    if tpl.page_count < 1:
-        raise SystemExit("template.pdf has no pages.")
-    p0 = tpl[0]
-    page_w, page_h = float(p0.rect.width), float(p0.rect.height)
-    tpl.close()
+    out_path = Path(args.output)
 
     # Read Excel
     df = pd.read_excel(excel_path)
@@ -441,14 +389,13 @@ def main():
     df_full = df.copy()
 
     # Drop title fields from the key-value printing DataFrame
-    df = df[[c for c in df.columns if c.lower() not in [t.lower() for t in title_fields]]]
+    df = df[[c for c in df.columns if c.lower() not in [t.lower() for t in exclusion_fields]]]
 
     # Fonts: hard-coded auto-detection (no CLI arg)
     ar_font = register_arabic_font()  # Arabic-capable or fallback to Helvetica
-    ar_font_bold = register_arabic_font_bold()
 
     # Create output
-    cnv = rl_canvas.Canvas(str(out_path), pagesize=(page_w, page_h))
+    cnv = rl_canvas.Canvas(str(out_path), pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
     cnv.setFillColor(black)
 
     # Layout constants
@@ -458,10 +405,10 @@ def main():
 
     # Calculate two column widths and positions
     col_gap = 10
-    content_width = (page_w - margin_l - margin_r) * 2.90/5.0
+    content_width = (PAGE_WIDTH - margin_l - margin_r) * 2.90/5.0
     col_width = (content_width - col_gap) / 2.0              # two columns inside that block
     # anchor the 2-column block to the RIGHT side of the page
-    block_left_x = page_w - margin_r - content_width
+    block_left_x = PAGE_WIDTH - margin_r - content_width
     left_x = block_left_x
     right_x = block_left_x + col_width + col_gap
 
@@ -473,16 +420,16 @@ def main():
         # Use mixed-script renderer for title
         title_font_size = 30
         title_top_padding = 40  # custom padding from top edge
-        y_title_top = page_h - margin_t - title_top_padding
+        y_title_top = PAGE_HEIGHT - margin_t - title_top_padding
         cnv.setFillColorRGB(98/255, 28/255, 154/255)  # #621c9a
         
         y_after_title = draw_mixed_line(
             cnv=cnv,
             x_left=margin_l,
             y_baseline=y_title_top,
-            max_width=page_w - margin_l - margin_r,
-            latin_font=LATIN_FONT_BOLD,
-            ar_font=ar_font_bold,
+            max_width=PAGE_WIDTH - margin_l - margin_r,
+            latin_font=LATIN_FONT,
+            ar_font=ar_font,
             kv_text=title_text,
             kv_size=title_font_size,
             leading=title_font_size + 6
@@ -599,5 +546,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# python main.py --excel "sample rows.xlsx" --template template.pdf --out output.pdf
