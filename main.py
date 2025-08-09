@@ -130,6 +130,59 @@ AR_CANDIDATES = [
     "AlBayan.ttc",      # macOS
 ]
 
+# ---- Bold Arabic font detection & registration ----
+LATIN_FONT_BOLD = "Helvetica-Bold"
+AR_FONT_BOLD_NAME = "CustomArabicFont-Bold"
+
+def _find_font_recursive(preferred_names, bases, exts=(".ttf", ".otf", ".ttc")) -> Optional[Path]:
+    for base in bases:
+        bp = Path(base)
+        if not bp.exists():
+            continue
+        for root, _, files in os.walk(bp):
+            for f in files:
+                lf = f.lower()
+                if not lf.endswith(exts):
+                    continue
+                for name in preferred_names:
+                    if name.lower() in lf:
+                        return Path(root) / f
+    return None
+
+def register_arabic_font_bold() -> str:
+    """
+    Try hard to find a *bold* Arabic font on macOS (Myriad/Kigelia/SF Arabic),
+    else fall back to Noto/Amiri bold, else to regular Arabic, else to Latin bold.
+    """
+    # Most likely macOS names first
+    preferred_names = [
+        "myriadarabic-bold", "myriad arabic bold",
+        "kigeliaarabic-bold", "kigelia arabic bold",
+        "sfarabic-bold", "sf arabic bold",
+        # common open fonts as fallback
+        "notonaskharabic-bold", "notokufiarabic-bold",
+        "amiri-bold",
+        "geeza", "albayan",
+    ]
+    bases = ["." , "/System/Library/Fonts", "/System/Library/Fonts/Supplemental",
+             "/Library/Fonts", os.path.expanduser("~/Library/Fonts"),
+             "/usr/share/fonts/truetype", "/usr/share/fonts"]
+
+    p = _find_font_recursive(preferred_names, bases)
+    if p:
+        try:
+            pdfmetrics.registerFont(TTFont(AR_FONT_BOLD_NAME, str(p)))
+            return AR_FONT_BOLD_NAME
+        except Exception:
+            pass
+
+    # fallbacks
+    try:
+        pdfmetrics.getFont(AR_FONT_NAME)  # your regular Arabic font name
+        return AR_FONT_NAME
+    except Exception:
+        return LATIN_FONT_BOLD
+
 
 def find_arabic_font_bold() -> Optional[Path]:
     # mirror your find_arabic_font(), but search bold candidates
@@ -142,23 +195,6 @@ def find_arabic_font_bold() -> Optional[Path]:
         except Exception:
             continue
     return None
-
-
-def register_arabic_font_bold() -> str:
-    """Register a bold Arabic-capable font; fall back to regular Arabic font or Helvetica-Bold."""
-    font_path = find_arabic_font_bold()
-    if font_path:
-        try:
-            pdfmetrics.registerFont(TTFont(AR_FONT_BOLD_NAME, str(font_path)))
-            return AR_FONT_BOLD_NAME
-        except Exception:
-            pass
-    # fallback: use regular arabic font name if you have it, else a latin bold
-    try:
-        pdfmetrics.getFont(AR_FONT_NAME)
-        return AR_FONT_NAME
-    except Exception:
-        return LATIN_FONT_BOLD
 
 
 def find_arabic_font() -> Optional[Path]:
@@ -309,13 +345,26 @@ def _normalize_value(v):
     return sv
 
 
-def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_latin, font_ar, font_size):
+def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_latin, font_ar, font_size, row_index):
     """Draw one table row with adjacent KEY and VALUE cells."""
-    # cell borders
+    # Alternate row background colors
+    LIGHT_PINK = (248/255, 236/255, 252/255)
+    DARK_PINK  = (232/255, 212/255, 244/255)
+
+    # Use row index to pick color — assumes caller passes `row_index` param
+    bg_color = LIGHT_PINK if row_index % 2 == 0 else DARK_PINK
+    cnv.setFillColorRGB(*bg_color)
+
+    # key cell background
+    cnv.rect(x, y - row_height, key_w, row_height, stroke=0, fill=1)
+    # value cell background
+    cnv.rect(x + key_w, y - row_height, val_w, row_height, stroke=0, fill=1)
+
+    # cell borders over the fill
+    cnv.setStrokeColorRGB(222/255, 185/255, 252/255)
+    # rgb(222,185,252)
     cnv.setLineWidth(0.5)
-    # key cell
     cnv.rect(x, y - row_height, key_w, row_height, stroke=1, fill=0)
-    # value cell
     cnv.rect(x + key_w, y - row_height, val_w, row_height, stroke=1, fill=0)
 
     # cell padding
@@ -468,28 +517,34 @@ def main():
 
         # draw LEFT column
         y = y_left
-        for key in col1_items:
+        for kv_idx, key in enumerate(col1_items):
             raw_val = row[key]
             val = _normalize_value(raw_val)
             draw_kv_row(
                 cnv, left_x, y, cell_height,
                 key_text=key, val_text=val,
                 key_w=key_w, val_w=val_w,
-                font_latin=LATIN_FONT, font_ar=ar_font, font_size=kv_font_size
+                font_latin=LATIN_FONT, 
+                font_ar=ar_font, 
+                font_size=kv_font_size,
+                row_index=kv_idx
             )
             y -= (cell_height + row_gap)
         y_left = y
 
         # draw RIGHT column
         y = y_right
-        for key in col2_items:
+        for kv_idx, key in enumerate(col2_items):
             raw_val = row[key]
             val = _normalize_value(raw_val)
             draw_kv_row(
                 cnv, right_x, y, cell_height,
                 key_text=key, val_text=val,
                 key_w=key_w, val_w=val_w,
-                font_latin=LATIN_FONT, font_ar=ar_font, font_size=kv_font_size
+                font_latin=LATIN_FONT, 
+                font_ar=ar_font, 
+                font_size=kv_font_size,
+                row_index=kv_idx
             )
             y -= (cell_height + row_gap)
         y_right = y
