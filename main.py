@@ -349,8 +349,6 @@ def main():
     margin_l, margin_r = 20, 20
     margin_t, margin_b = 20, 20
     kv_font_size = 10
-    leading = 18
-    gap_between_pairs = 6
 
     # Calculate two column widths and positions
     col_gap = 10
@@ -367,8 +365,9 @@ def main():
         title_text = f"{row_full['Region']} – {row_full['City']} – {row_full['Hay']} – {row_full['PCA']}"
 
         # Use mixed-script renderer for title
-        title_font_size = 14
-        y_title_top = page_h - margin_t
+        title_font_size = 30
+        title_top_padding = 40  # custom padding from top edge
+        y_title_top = page_h - margin_t - title_top_padding
         y_after_title = draw_mixed_line(
             cnv=cnv,
             x_left=margin_l,
@@ -378,11 +377,11 @@ def main():
             ar_font=ar_font,
             kv_text=title_text,
             kv_size=title_font_size,
-            leading=title_font_size + 6  # line height for title
+            leading=title_font_size + 6
         )
 
         # Add spacing before key-value columns start
-        title_to_columns_gap = 20
+        title_to_columns_gap = 2.5
         y_left = y_after_title - title_to_columns_gap
         y_right = y_after_title - title_to_columns_gap
         col_toggle = "left"
