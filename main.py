@@ -96,6 +96,19 @@ def shape_arabic(s: str) -> str:
 LATIN_FONT = "Helvetica"           # built-in (good Latin)
 AR_FONT_NAME = "CustomArabicFont"  # we will register an Arabic-capable font here
 
+LATIN_FONT_BOLD = "Helvetica-Bold"
+AR_FONT_BOLD_NAME = "CustomArabicFont-Bold"
+
+BOLD_CANDIDATES = [
+    "NotoNaskhArabic-Bold.ttf",
+    "NotoKufiArabic-Bold.ttf",
+    "Amiri-Bold.ttf",
+    "GeezaPro.ttc",
+    "AlBayan.ttc",
+    "Arabtype.ttf",
+]
+
+
 FONT_SEARCH_PATHS = [
     # current folder first (drop a copy of the ttf/ttc here for best reliability)
     ".",
@@ -117,6 +130,37 @@ AR_CANDIDATES = [
     "AlBayan.ttc",      # macOS
 ]
 
+
+def find_arabic_font_bold() -> Optional[Path]:
+    # mirror your find_arabic_font(), but search bold candidates
+    for base in FONT_SEARCH_PATHS:
+        try:
+            for cand in BOLD_CANDIDATES:
+                p = Path(base) / cand if base != "." else Path(cand)
+                if p.exists():
+                    return p
+        except Exception:
+            continue
+    return None
+
+
+def register_arabic_font_bold() -> str:
+    """Register a bold Arabic-capable font; fall back to regular Arabic font or Helvetica-Bold."""
+    font_path = find_arabic_font_bold()
+    if font_path:
+        try:
+            pdfmetrics.registerFont(TTFont(AR_FONT_BOLD_NAME, str(font_path)))
+            return AR_FONT_BOLD_NAME
+        except Exception:
+            pass
+    # fallback: use regular arabic font name if you have it, else a latin bold
+    try:
+        pdfmetrics.getFont(AR_FONT_NAME)
+        return AR_FONT_NAME
+    except Exception:
+        return LATIN_FONT_BOLD
+
+
 def find_arabic_font() -> Optional[Path]:
     for base in FONT_SEARCH_PATHS:
         try:
@@ -127,6 +171,7 @@ def find_arabic_font() -> Optional[Path]:
         except Exception:
             continue
     return None
+
 
 def register_arabic_font() -> str:
     """
@@ -143,9 +188,11 @@ def register_arabic_font() -> str:
     # Fallback (won't shape Arabic correctly if glyphs missing)
     return LATIN_FONT
 
+
 # ---------------- Layout helpers ----------------
 def text_width(text: str, font_name: str, font_size: float) -> float:
     return pdfmetrics.stringWidth(text, font_name, font_size)
+
 
 def segment_by_script(s: str) -> List[Tuple[bool, str]]:
     """
@@ -166,6 +213,7 @@ def segment_by_script(s: str) -> List[Tuple[bool, str]]:
             cur_is_ar = ia
     runs.append((cur_is_ar, "".join(cur)))
     return runs
+
 
 def draw_mixed_line(
     cnv: rl_canvas.Canvas,
@@ -275,28 +323,34 @@ def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_la
 
     # vertically center single-line text
     baseline = y - (row_height - font_size) / 2 - 2.5
+    
+    # Set key text bold and color
+    cnv.setFillColorRGB(98/255, 28/255, 154/255)
+    cnv.setFont(font_latin + "-Bold", font_size)
 
-    # key (left cell)
+    # key (left cell) — bold + purple
+    cnv.setFillColorRGB(98/255, 28/255, 154/255)  # #621c9a
     draw_mixed_line(
         cnv=cnv,
         x_left=x + CELL_PAD,
         y_baseline=baseline,
         max_width=key_w - 2 * CELL_PAD,
-        latin_font=font_latin,
-        ar_font=font_latin,
+        latin_font=LATIN_FONT_BOLD,  # bold latin
+        ar_font=AR_FONT_BOLD_NAME,   # bold arabic (registered above; falls back gracefully)
         kv_text=str(key_text),
         kv_size=font_size,
         leading=font_size + 2
     )
 
-    # value (right cell)
+    # value (right cell) — normal color / weight
+    cnv.setFillColor(black)
     draw_mixed_line(
         cnv=cnv,
         x_left=x + key_w + CELL_PAD,
         y_baseline=baseline,
         max_width=val_w - 2 * CELL_PAD,
-        latin_font=font_latin,
-        ar_font=font_ar,
+        latin_font=font_latin,  # normal latin
+        ar_font=font_ar,        # normal arabic
         kv_text=str(val_text),
         kv_size=font_size,
         leading=font_size + 2
@@ -340,6 +394,7 @@ def main():
 
     # Fonts: hard-coded auto-detection (no CLI arg)
     ar_font = register_arabic_font()  # Arabic-capable or fallback to Helvetica
+    ar_font_bold = register_arabic_font_bold()
 
     # Create output
     cnv = rl_canvas.Canvas(str(out_path), pagesize=(page_w, page_h))
@@ -348,11 +403,11 @@ def main():
     # Layout constants
     margin_l, margin_r = 20, 20
     margin_t, margin_b = 20, 20
-    kv_font_size = 10
+    kv_font_size = 11
 
     # Calculate two column widths and positions
     col_gap = 10
-    content_width = (page_w - margin_l - margin_r) * 2.90/5.0   # take ~2/3 of usable width
+    content_width = (page_w - margin_l - margin_r) * 2.90/5.0
     col_width = (content_width - col_gap) / 2.0              # two columns inside that block
     # anchor the 2-column block to the RIGHT side of the page
     block_left_x = page_w - margin_r - content_width
@@ -368,17 +423,20 @@ def main():
         title_font_size = 30
         title_top_padding = 40  # custom padding from top edge
         y_title_top = page_h - margin_t - title_top_padding
+        cnv.setFillColorRGB(98/255, 28/255, 154/255)  # #621c9a
+        
         y_after_title = draw_mixed_line(
             cnv=cnv,
             x_left=margin_l,
             y_baseline=y_title_top,
             max_width=page_w - margin_l - margin_r,
-            latin_font=LATIN_FONT,
-            ar_font=ar_font,
+            latin_font=LATIN_FONT_BOLD,
+            ar_font=ar_font_bold,
             kv_text=title_text,
             kv_size=title_font_size,
             leading=title_font_size + 6
         )
+        cnv.setFillColor(black)  # reset for body
 
         # Add spacing before key-value columns start
         title_to_columns_gap = 2.5
