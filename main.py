@@ -9,17 +9,16 @@ Excel -> PDF (one page per row), simple "Key: Value" list.
 - Very simple wrapping to page width (left-aligned lines for simplicity)
 
 Run:
-    python main2.py --excel "sample rows.xlsx" --output new.pdf
+    python main.py --excel "sample rows.xlsx" --output new.pdf
 """
 
 import os
 import argparse
 from pathlib import Path
+from datetime import datetime
 from typing import Optional, List, Tuple
 
-import fitz
 import pandas as pd
-
 from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.lib.utils import ImageReader
@@ -31,6 +30,8 @@ from reportlab.lib.pagesizes import landscape, A4
 # Hard-coded Page size using A4-landscape width
 PAGE_WIDTH, PAGE_HEIGHT = landscape(A4)
 # PAGE_HEIGHT = PAGE_WIDTH * 9.0 / 16.0         # If a 16:9 page area is required
+
+os.makedirs("output", exist_ok=True)
 
 # Arabic helpers
 try:
@@ -370,11 +371,10 @@ def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_la
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--excel", required=True, help="Path to input .xlsx")
-    ap.add_argument("--output", default="output_simple.pdf", help="Output PDF path")
     args = ap.parse_args()
 
     excel_path = Path(args.excel)
-    out_path = Path(args.output)
+    out_path = os.path.join("output", f"{datetime.now().strftime(r'%H%M%S_%d%m%Y')}.pdf")
 
     # Read Excel
     df = pd.read_excel(excel_path)

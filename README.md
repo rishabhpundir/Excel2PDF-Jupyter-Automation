@@ -8,4 +8,4 @@ Excel -> PDF (one page per row), simple "Key: Value" list.
 - Very simple wrapping to page width (left-aligned lines for simplicity)
 
 Run:
-    python excel2pdf.py --excel "sample rows.xlsx" --output output.pdf
+    python main.py --excel "sample rows.xlsx" --output output.pdf
