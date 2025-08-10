@@ -9,40 +9,69 @@ Excel -> PDF (one page per row), simple "Key: Value" list.
 - Very simple wrapping to page width (left-aligned lines for simplicity)
 
 Run:
-    python main.py --excel "sample rows.xlsx" --output new.pdf
+    python main.py --excel "sample rows.xlsx"
 """
 
+import re
 import os
 import argparse
 from pathlib import Path
-from datetime import datetime
 from typing import Optional, List, Tuple
+from datetime import datetime, date, time
 
 import pandas as pd
+from openpyxl import load_workbook
 from reportlab.lib.colors import black
 from reportlab.pdfbase import pdfmetrics
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib.pagesizes import landscape, A4
+from openpyxl.styles.numbers import is_date_format
 
+# ---------------------- CONFIGURATION AREA ----------------------
+
+# Directories
+IMAGES_PATH = "images"
+os.makedirs("output", exist_ok=True)
 
 # Hard-coded Page size using A4-landscape width
 PAGE_WIDTH, PAGE_HEIGHT = landscape(A4)
 # PAGE_HEIGHT = PAGE_WIDTH * 9.0 / 16.0         # If a 16:9 page area is required
 
-os.makedirs("output", exist_ok=True)
+# Alternate row background colors
+LIGHT_PINK = (248/255, 236/255, 252/255) 
+DARK_PINK  = (232/255, 212/255, 244/255)
 
-# Arabic helpers
-try:
-    import arabic_reshaper
-    from bidi.algorithm import get_display
-except Exception:
-    arabic_reshaper = None
-    get_display = None
-    
-# ONLY list columns that are required
-template_keys = [
+CELL_BORDERS = (222/255, 185/255, 252/255)
+
+TITLE_N_CATEGORY_COLOR = (98/255, 28/255, 154/255)
+
+# cell small horizontal padding
+CELL_PAD = 6
+
+# Cell style height/gap
+cell_height = 30
+row_gap = 0
+
+# Gap between data columns
+col_gap = 10
+
+# Layout constants
+margin_l, margin_r = 20, 20
+margin_t, margin_b = 20, 20
+
+        
+# --- start LEFT-SIDE IMAGE ---
+img_gap = 5     # gap between image block and table block
+img_pad = 5      # inner padding inside the image block
+
+# Font Sizes
+KV_FONT_SIZE = 11       # Key-Value Pair Font Size
+TITLE_FONT_SIZE = 30
+
+# ONLY list columns that are required to display
+FIELDS_TO_KEEP = [
     "region", "city", "hay", "pca",
     "Population",
     "Total Premisis (Census)",
@@ -75,11 +104,21 @@ template_keys = [
     "image"
 ]
 
-exclusion_fields = ["region", "city", "hay", "pca", "image"]
+EXCLUSION_FIELDS = ["region", "city", "hay", "pca", "image"]
+
+# ---------------------- CONFIGURATION AREA ----------------------
+
+# Arabic helpers
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+except Exception:
+    arabic_reshaper = None
+    get_display = None
 
 # ---------------- Fonts ----------------
-LATIN_FONT = "Helvetica"           # built-in (good Latin)
-AR_FONT_NAME = "CustomArabicFont"  # we will register an Arabic-capable font here
+LATIN_FONT = "Helvetica"
+AR_FONT_NAME = "CustomArabicFont"
 
 LATIN_FONT_BOLD = "Helvetica-Bold"
 AR_FONT_BOLD_NAME = "CustomArabicFont-Bold"
@@ -106,6 +145,7 @@ FONT_SEARCH_PATHS = [
     "/usr/share/fonts/truetype",
     "/usr/share/fonts",
 ]
+
 # Prefer fonts that include BOTH Arabic and Latin glyphs.
 AR_CANDIDATES = [
     "NotoNaskhArabic-Regular.ttf",
@@ -114,6 +154,137 @@ AR_CANDIDATES = [
     "GeezaPro.ttc",     # macOS
     "AlBayan.ttc",      # macOS
 ]
+
+
+# ---------------- Helper for reading excel sheets ----------------
+_percent_re = re.compile(r'%(?!")')  # a % not inside quotes
+_dec_re     = re.compile(r'0|#')     # count decimal placeholders
+_group_re   = re.compile(r'[#0],[#0]{3}')  # crude grouping detector like #,##0
+
+def _extract_currency(fmt: str) -> str:
+    if "[$" in fmt:
+        try:
+            part = fmt.split("[$", 1)[1]
+            token = part.split("]", 1)[0]
+            sym = token.split("-", 1)[0]
+            return sym
+        except Exception:
+            pass
+    for s in ["$", "€", "£", "₹", "¥", "₩", "₽", "₺", "R$", "₴", "₦"]:
+        if s in fmt:
+            return s
+    return ""
+
+
+def _format_number_by_mask(value: float, fmt: str) -> str:
+    # Handle percent
+    if _percent_re.search(fmt):
+        # count decimals before %
+        dec_part = fmt.split("%")[0]
+        if "." in dec_part:
+            decimals = len(_dec_re.findall(dec_part.split(".", 1)[1]))
+        else:
+            decimals = 0
+        return f"{value*100:.{decimals}f}%"
+
+    # Handle scientific
+    if "E+" in fmt.upper() or "E-" in fmt.upper():
+        # count decimals after dot if present
+        decimals = 0
+        if "." in fmt:
+            decimals = len(_dec_re.findall(fmt.split(".", 1)[1]))
+        return f"{value:.{decimals}E}"
+
+    # Handle currency & general fixed/variable decimals
+    currency = _extract_currency(fmt)
+    use_grouping = bool(_group_re.search(fmt))
+    decimals = 0
+    if "." in fmt:
+        decimals = len(_dec_re.findall(fmt.split(".", 1)[1]))
+
+    # Build base number string
+    if use_grouping:
+        num = f"{value:,.{decimals}f}"
+    else:
+        num = f"{value:.{decimals}f}"
+
+    # For masks using '#' after decimal, we can trim trailing zeros
+    if "." in fmt and "#" in fmt.split(".", 1)[1]:
+        if "." in num:
+            num = num.rstrip("0").rstrip(".")
+
+    return f"{currency}{num}" if currency else num
+
+
+def _cell_rich_text_to_str(cell) -> str:
+    # openpyxl 3.1+: when iter_rows(..., rich_text=True), cell.rich_text is a list of runs
+    runs = getattr(cell, "rich_text", None)
+    if runs:
+        return "".join(getattr(r, "text", "") for r in runs)
+    v = cell.value
+    return "" if v is None else str(v)
+
+
+def read_excel_preserve_display(path, sheet=0):
+    """
+    Reads an Excel sheet and returns a DataFrame of strings matching Excel's displayed text:
+      - Percent: uses the cell's number_format (32% / 32.5% / 32.50%)
+      - Currency / grouped numbers: respects grouping and decimals
+      - Scientific: respects E-format decimals
+      - Dates/Times: ISO strings (YYYY-MM-DD / HH:MM:SS)
+      - Text (including rich text): concatenates runs in order
+      - Blanks: ''
+    """
+    wb = load_workbook(path, data_only=True, read_only=True, rich_text=True)
+    ws = wb[wb.sheetnames[sheet] if isinstance(sheet, int) else sheet]
+
+    rows = ws.iter_rows(values_only=False)
+
+    # Header row (preserve as plain strings / rich text concatenation)
+    hdr_cells = next(rows)
+    headers = [(_cell_rich_text_to_str(c) or "").strip() for c in hdr_cells]
+
+    out = []
+    for r in rows:
+        row_out = []
+        for c in r:
+            v = c.value
+            if v is None:
+                row_out.append("")
+                continue
+
+            fmt = (c.number_format or "").strip()
+
+            # Dates / times (Excel serials already evaluated by data_only=True)
+            if is_date_format(fmt) or isinstance(v, (datetime, date, time)):
+                if isinstance(v, datetime):
+                    row_out.append(v.strftime("%Y-%m-%d"))
+                elif isinstance(v, date):
+                    row_out.append(v.strftime("%Y-%m-%d"))
+                elif isinstance(v, time):
+                    row_out.append(v.strftime("%H:%M:%S"))
+                else:
+                    row_out.append(str(v))
+                continue
+
+            # Numbers (float / int): format per mask; otherwise plain numeric string
+            if isinstance(v, (int, float)):
+                if fmt and fmt != "General":
+                    v = round(float(v), 2)
+                    row_out.append(_format_number_by_mask(float(v), fmt))
+                else:
+                    # Plain numeric, no extra chars
+                    if isinstance(v, int):
+                        row_out.append(str(v))
+                    else:
+                        row_out.append(format(v, ".15g"))  # compact float as string
+                continue
+
+            # Text (including rich text)
+            row_out.append(_cell_rich_text_to_str(c))
+        out.append(row_out)
+
+    return pd.DataFrame(out, columns=headers)
 
 
 # ---------------- Arabic detection / shaping ----------------
@@ -308,9 +479,6 @@ def _normalize_value(v):
 
 def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_latin, font_ar, font_size, row_index):
     """Draw one table row with adjacent KEY and VALUE cells."""
-    # Alternate row background colors
-    LIGHT_PINK = (248/255, 236/255, 252/255)
-    DARK_PINK  = (232/255, 212/255, 244/255)
 
     # Use row index to pick color — assumes caller passes `row_index` param
     bg_color = LIGHT_PINK if row_index % 2 == 0 else DARK_PINK
@@ -322,24 +490,21 @@ def draw_kv_row(cnv, x, y, row_height, key_text, val_text, key_w, val_w, font_la
     cnv.rect(x + key_w, y - row_height, val_w, row_height, stroke=0, fill=1)
 
     # cell borders over the fill
-    cnv.setStrokeColorRGB(222/255, 185/255, 252/255)
+    cnv.setStrokeColorRGB(*CELL_BORDERS)
     # rgb(222,185,252)
     cnv.setLineWidth(0.5)
     cnv.rect(x, y - row_height, key_w, row_height, stroke=1, fill=0)
     cnv.rect(x + key_w, y - row_height, val_w, row_height, stroke=1, fill=0)
 
-    # cell padding
-    CELL_PAD = 6  # <-- small horizontal padding
-
     # vertically center single-line text
     baseline = y - (row_height - font_size) / 2 - 2.5
     
     # Set key text bold and color
-    cnv.setFillColorRGB(98/255, 28/255, 154/255)
+    cnv.setFillColorRGB(*TITLE_N_CATEGORY_COLOR)
     cnv.setFont(font_latin + "-Bold", font_size)
 
     # key (left cell) — bold + purple
-    cnv.setFillColorRGB(98/255, 28/255, 154/255)  # #621c9a
+    cnv.setFillColorRGB(*TITLE_N_CATEGORY_COLOR)  # #621c9a
     draw_mixed_line(
         cnv=cnv,
         x_left=x + CELL_PAD,
@@ -377,19 +542,23 @@ def main():
     out_path = os.path.join("output", f"{datetime.now().strftime(r'%H%M%S_%d%m%Y')}.pdf")
 
     # Read Excel
-    df = pd.read_excel(excel_path)
+    df = read_excel_preserve_display(excel_path)
+
+    df = df.fillna("").astype(str)
     df.columns = [str(c).strip() for c in df.columns]
 
     # case-insensitive mapping to actual Excel headers
     lc_to_orig = {c.lower(): c for c in df.columns}
-    keep_cols = [lc_to_orig[k.lower()] for k in template_keys if k.lower() in lc_to_orig]
+    keep_cols = [lc_to_orig[k.lower()] for k in FIELDS_TO_KEEP if k.lower() in lc_to_orig]
 
-    # filter & reorder
-    df = df[keep_cols]
+    # filter & reorder, fill empty cells, and force all data to string
+    df = df[keep_cols].fillna("").astype(str)
+
+    # make a full copy for title fields, also guaranteed to be str
     df_full = df.copy()
 
     # Drop title fields from the key-value printing DataFrame
-    df = df[[c for c in df.columns if c.lower() not in [t.lower() for t in exclusion_fields]]]
+    df = df[[c for c in df.columns if c.lower() not in [t.lower() for t in EXCLUSION_FIELDS]]]
 
     # Fonts: hard-coded auto-detection (no CLI arg)
     ar_font = register_arabic_font()  # Arabic-capable or fallback to Helvetica
@@ -398,13 +567,7 @@ def main():
     cnv = rl_canvas.Canvas(str(out_path), pagesize=(PAGE_WIDTH, PAGE_HEIGHT))
     cnv.setFillColor(black)
 
-    # Layout constants
-    margin_l, margin_r = 20, 20
-    margin_t, margin_b = 20, 20
-    kv_font_size = 11
-
     # Calculate two column widths and positions
-    col_gap = 10
     content_width = (PAGE_WIDTH - margin_l - margin_r) * 2.90/5.0
     col_width = (content_width - col_gap) / 2.0              # two columns inside that block
     # anchor the 2-column block to the RIGHT side of the page
@@ -418,7 +581,6 @@ def main():
         title_text = f"{row_full['Region']} – {row_full['City']} – {row_full['Hay']} – {row_full['PCA']}"
 
         # Use mixed-script renderer for title
-        title_font_size = 30
         title_top_padding = 40  # custom padding from top edge
         y_title_top = PAGE_HEIGHT - margin_t - title_top_padding
         cnv.setFillColorRGB(98/255, 28/255, 154/255)  # #621c9a
@@ -431,8 +593,8 @@ def main():
             latin_font=LATIN_FONT,
             ar_font=ar_font,
             kv_text=title_text,
-            kv_size=title_font_size,
-            leading=title_font_size + 6
+            kv_size=TITLE_FONT_SIZE,
+            leading=TITLE_FONT_SIZE + 6
         )
         cnv.setFillColor(black)  # reset for body
 
@@ -441,9 +603,6 @@ def main():
         y_left = y_after_title - title_to_columns_gap
         y_right = y_after_title - title_to_columns_gap
         col_toggle = "left"
-
-        cell_height = 30
-        row_gap = 0
 
         # equal widths for key and value cells
         key_w = col_width / 2.0
@@ -475,7 +634,7 @@ def main():
                 key_w=key_w, val_w=val_w,
                 font_latin=LATIN_FONT, 
                 font_ar=ar_font, 
-                font_size=kv_font_size,
+                font_size=KV_FONT_SIZE,
                 row_index=kv_idx
             )
             y -= (cell_height + row_gap)
@@ -492,15 +651,11 @@ def main():
                 key_w=key_w, val_w=val_w,
                 font_latin=LATIN_FONT, 
                 font_ar=ar_font, 
-                font_size=kv_font_size,
+                font_size=KV_FONT_SIZE,
                 row_index=kv_idx
             )
             y -= (cell_height + row_gap)
         y_right = y
-        
-        # --- start LEFT-SIDE IMAGE ---
-        img_gap = 5     # gap between image block and table block
-        img_pad = 5      # inner padding inside the image block
 
         # Horizontal bounds for the image area
         img_left_x  = margin_l
@@ -512,12 +667,12 @@ def main():
         img_bottom = margin_b
         img_height = max(0, img_top - img_bottom)
 
-        # Try to load the image from ./images/<filename in 'image' column>
+        # Try to load the image from IMAGES FOLDER
         row_full = df_full.iloc[idx]  # original row with all fields
         img_name = str(row_full.get('image', '')).strip() if hasattr(row_full, "get") else ""
-        img_path = Path("images") / img_name
+        img_path = os.path.join(IMAGES_PATH, img_name) 
 
-        if img_width > 0 and img_height > 0 and img_name and img_path.exists():
+        if img_width > 0 and img_height > 0 and img_name and os.path.exists(img_path):
             reader = ImageReader(str(img_path))
             iw, ih = reader.getSize()
 
